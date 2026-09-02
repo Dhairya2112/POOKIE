@@ -13,33 +13,28 @@ module level (singleton pattern) to avoid reloading heavy models on every
 function call.
 """
 
-import re
-import time
 import logging
+import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
-
-
-from channels.layers import get_channel_layer
-from asgiref.sync import async_to_sync
 from datetime import datetime, timezone
 
-from .llm_agent import SetuAgent
-from .fast_responses import FastResponseRouter
-from .tts_cache import TTSCache
-from core.ai.tts import TTSEngine
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
+
 from core.conversations.models import Conversation, Message, MessageMetadata
 
 logger = logging.getLogger('core.agent')
 
-from core.agent.state import get_agent, get_tts, get_fast_router, get_tts_cache
-
-
-from core.agent.state import register_cancellation, unregister_cancellation, is_cancelled
-
 # ── User preference cache ──────────────────────────────────
 # Avoids a MongoDB lookup on every single command.
 from django.core.cache import cache
+
+from core.agent.state import (get_agent, get_fast_router, get_tts,
+                              get_tts_cache, is_cancelled,
+                              register_cancellation, unregister_cancellation)
+
 _PREF_CACHE_TTL  = 300  # 5 minutes
 
 
@@ -217,7 +212,8 @@ def process_agent_command(text: str, conversation_id: str, user_id: str, channel
                     logger.warning("TTS chunk failed: %s", e)
 
             # Max workers=1 ensures TTS chunks are generated and sent in spoken order
-            with ThreadPoolExecutor(max_workers=1) as tts_executor:
+            tts_executor = ThreadPoolExecutor(max_workers=1)
+            try:
                 for token in get_agent().run_stream(
                     text, 
                     user_id=user_id, 
@@ -227,6 +223,7 @@ def process_agent_command(text: str, conversation_id: str, user_id: str, channel
                     if is_cancelled(conversation_id):
                         logger.info("Command processing cancelled for %s", conversation_id)
                         _push(channel_layer, group, 'status', 'cancelled')
+                        tts_executor.shutdown(wait=False)
                         return True
                     if token:
                         _push(channel_layer, group, 'text', token)
@@ -248,6 +245,14 @@ def process_agent_command(text: str, conversation_id: str, user_id: str, channel
                 final_audio = audio_buffer + sentence_buffer
                 if final_audio.strip():
                     tts_executor.submit(generate_and_push_tts, final_audio.strip())
+                
+                tts_executor.shutdown(wait=True)
+            except Exception as e:
+                try:
+                    tts_executor.shutdown(wait=False, cancel_futures=True)
+                except TypeError:
+                    tts_executor.shutdown(wait=False)
+                raise e
 
         except Exception as e:
             logger.error("LLM stream failed for conversation %s: %s", conversation_id, e)
@@ -259,7 +264,7 @@ def process_agent_command(text: str, conversation_id: str, user_id: str, channel
             response_text += error_msg
             has_error = True
             
-            generate_and_push_tts("Sorry, I ran into a system error.")
+            threading.Thread(target=generate_and_push_tts, args=("Sorry, I ran into a system error.",), daemon=True).start()
 
         if is_cancelled(conversation_id):
             _push(channel_layer, group, 'status', 'cancelled')

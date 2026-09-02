@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from "react";
 
 export function useAudioAnalyser() {
   const [isActive, setIsActive] = useState(false);
@@ -14,46 +14,69 @@ export function useAudioAnalyser() {
     setError(null);
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error('Web Audio API not supported in this browser environment.');
+        throw new Error(
+          "Web Audio API not supported in this browser environment.",
+        );
       }
 
       // Initialize Speech Recognition if available
-      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      const SpeechRecognition =
+        window.SpeechRecognition || window.webkitSpeechRecognition;
       if (SpeechRecognition) {
         const recognition = new SpeechRecognition();
         recognition.continuous = false;
         recognition.interimResults = false;
-        recognition.lang = 'en-US';
+        recognition.lang = "en-US";
 
         recognition.onresult = (event) => {
           let transcript = event.results[0][0].transcript;
-          
+
           // Phonetic correction for misheard "Setu" wake word variations (Google/browser STT limits)
           const lower = transcript.toLowerCase().trim();
           const misheardPrefixes = [
-            'hey say to', 'hey set to', 'hey c2', 'hey c two', 
-            'hey seytu', 'hey sato', 'hey sito', 'hey statu',
-            'hey center', 'hey sentry'
+            "hey say to",
+            "hey set to",
+            "hey c2",
+            "hey c two",
+            "hey seytu",
+            "hey sato",
+            "hey sito",
+            "hey statu",
+            "hey center",
+            "hey sentry",
           ];
-          
-          const matchedPrefix = misheardPrefixes.find(p => lower.startsWith(p));
+
+          const matchedPrefix = misheardPrefixes.find((p) =>
+            lower.startsWith(p),
+          );
           if (matchedPrefix) {
-            const regex = new RegExp(`^${matchedPrefix}`, 'i');
-            transcript = transcript.replace(regex, 'hey setu');
+            const regex = new RegExp(`^${matchedPrefix}`, "i");
+            transcript = transcript.replace(regex, "hey setu");
           } else {
-            const singleNameMishears = ['say to', 'set to', 'c2', 'c two', 'seytu', 'sato', 'sito', 'statu', 'center', 'sentry'];
+            const singleNameMishears = [
+              "say to",
+              "set to",
+              "c2",
+              "c two",
+              "seytu",
+              "sato",
+              "sito",
+              "statu",
+              "center",
+              "sentry",
+            ];
             if (singleNameMishears.includes(lower)) {
-              transcript = 'setu';
+              transcript = "setu";
             }
           }
 
-          if (onTranscript && transcript.trim() !== '') {
+          if (onTranscript && transcript.trim() !== "") {
             onTranscript(transcript);
           }
         };
 
         recognition.onerror = (event) => {
-          console.warn('Speech recognition error', event.error);
+          console.warn("Speech recognition error", event.error);
         };
 
         recognition.onend = () => {
@@ -64,25 +87,31 @@ export function useAudioAnalyser() {
         speechRecognitionRef.current = recognition;
         recognition.start();
       } else {
-        console.warn("Speech Recognition not supported in this browser. Fallback to manual typing.");
+        console.warn(
+          "Speech Recognition not supported in this browser. Fallback to manual typing.",
+        );
       }
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: false,
+      });
       streamRef.current = stream;
 
-      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      const AudioContextClass =
+        window.AudioContext || window.webkitAudioContext;
       const ctx = new AudioContextClass();
       audioContextRef.current = ctx;
 
       // Handle typical browser interactive autoplay blocks
-      if (ctx.state === 'suspended') {
+      if (ctx.state === "suspended") {
         const resumeContext = async () => {
           await ctx.resume();
-          window.removeEventListener('click', resumeContext);
-          window.removeEventListener('keydown', resumeContext);
+          window.removeEventListener("click", resumeContext);
+          window.removeEventListener("keydown", resumeContext);
         };
-        window.addEventListener('click', resumeContext);
-        window.addEventListener('keydown', resumeContext);
+        window.addEventListener("click", resumeContext);
+        window.addEventListener("keydown", resumeContext);
       }
 
       const source = ctx.createMediaStreamSource(stream);
@@ -95,8 +124,8 @@ export function useAudioAnalyser() {
       dataArrayRef.current = new Uint8Array(analyser.frequencyBinCount);
       setIsActive(true);
     } catch (err) {
-      console.warn('Microphone configuration error:', err);
-      setError(err.message || 'Microphone activation blocked.');
+      console.warn("Microphone configuration error:", err);
+      setError(err.message || "Microphone activation blocked.");
       setIsActive(false);
     }
   }, []);
@@ -107,13 +136,12 @@ export function useAudioAnalyser() {
       speechRecognitionRef.current = null;
     }
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
     }
     if (audioContextRef.current) {
-      if (audioContextRef.current.state !== 'closed') {
-          // Suspend instead of close to prevent interrupting other browser audio elements
-          audioContextRef.current.suspend().catch(() => {});
+      if (audioContextRef.current.state !== "closed") {
+        audioContextRef.current.close().catch(() => {});
       }
     }
     analyserRef.current = null;
@@ -132,11 +160,13 @@ export function useAudioAnalyser() {
     // Focus analysis tightly on the vocal range: 250Hz - 2000Hz (bins 6 to 48)
     const vocalRange = buffer.slice(6, 48);
     const sum = vocalRange.reduce((acc, val) => acc + val, 0);
-    const rawAverage = vocalRange.length > 0 ? (sum / vocalRange.length) / 255.0 : 0.0;
+    const rawAverage =
+      vocalRange.length > 0 ? sum / vocalRange.length / 255.0 : 0.0;
 
     // Apply Exponential Moving Average (EMA) to prevent visual vertex stutter
     const alpha = 0.35; // Custom filter coefficient (high values increase reactivity)
-    smoothedEnergyRef.current = (alpha * rawAverage) + ((1.0 - alpha) * smoothedEnergyRef.current);
+    smoothedEnergyRef.current =
+      alpha * rawAverage + (1.0 - alpha) * smoothedEnergyRef.current;
 
     return smoothedEnergyRef.current;
   }, []);
@@ -147,21 +177,31 @@ export function useAudioAnalyser() {
    * @param sensitivityThreshold - Derived from Settings Slider (0.0 - 1.0)
    * @param onBargeIn - Callback to execute on interruption
    */
-  const monitorBargeIn = useCallback((sensitivityThreshold, onBargeIn) => {
-    if (!analyserRef.current) return;
-    const currentVolume = getNormalizedEnergy();
-    
-    // Scale sensitivity threshold so that a lower sensitivity value in UI requires a higher acoustic burst
-    const mappedThreshold = (1.0 - sensitivityThreshold) * 0.85 + 0.1;
-    
-    if (currentVolume > mappedThreshold) {
-      onBargeIn();
-    }
-  }, [getNormalizedEnergy]);
+  const monitorBargeIn = useCallback(
+    (sensitivityThreshold, onBargeIn) => {
+      if (!analyserRef.current) return;
+      const currentVolume = getNormalizedEnergy();
+
+      // Scale sensitivity threshold so that a lower sensitivity value in UI requires a higher acoustic burst
+      const mappedThreshold = (1.0 - sensitivityThreshold) * 0.85 + 0.1;
+
+      if (currentVolume > mappedThreshold) {
+        onBargeIn();
+      }
+    },
+    [getNormalizedEnergy],
+  );
 
   useEffect(() => {
     return () => stopListening();
   }, [stopListening]);
 
-  return { startListening, stopListening, getNormalizedEnergy, monitorBargeIn, isActive, error };
+  return {
+    startListening,
+    stopListening,
+    getNormalizedEnergy,
+    monitorBargeIn,
+    isActive,
+    error,
+  };
 }

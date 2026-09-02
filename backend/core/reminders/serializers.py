@@ -1,6 +1,7 @@
 
-from rest_framework import serializers
 from datetime import datetime, timezone
+
+from rest_framework import serializers
 
 
 class ReminderSerializer(serializers.Serializer):

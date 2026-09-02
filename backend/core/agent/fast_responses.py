@@ -8,8 +8,8 @@ This is the first layer of the 3-tier response architecture:
   Tier 0 (this) → Tier 1 (Intent Classifier, Step 15) → Tier 2 (LLM)
 """
 
-import re
 import random
+import re
 from dataclasses import dataclass
 from typing import Optional
 

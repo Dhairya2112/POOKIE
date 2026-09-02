@@ -7,16 +7,16 @@ PyJWTAuthentication — DRF authentication class used on all protected endpoints
 Token lifetimes are configured in settings.SIMPLE_JWT.
 """
 
-import logging
-import jwt
 import hashlib
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import jwt
 from django.conf import settings
 from rest_framework import authentication, exceptions
 
-from .models import User, RefreshToken
+from .models import RefreshToken, User
 
 logger = logging.getLogger('core.users')
 
@@ -101,6 +101,7 @@ class PyJWTAuthentication(authentication.BaseAuthentication):
             raise exceptions.AuthenticationFailed('Invalid token.')
 
 from allauth.account.adapter import DefaultAccountAdapter
+
 
 class NoNewUsersAccountAdapter(DefaultAccountAdapter):
     """

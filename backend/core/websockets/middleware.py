@@ -9,11 +9,13 @@ Unauthorized consumers are closed with code 4001.
 """
 
 import logging
-import jwt
-from django.conf import settings
-from channels.middleware import BaseMiddleware
 from urllib.parse import parse_qs
+
+import jwt
 from asgiref.sync import sync_to_async
+from channels.middleware import BaseMiddleware
+from django.conf import settings
+
 from core.users.models import User
 
 logger = logging.getLogger('core.websockets')
@@ -59,7 +61,22 @@ class JwtAuthMiddleware(BaseMiddleware):
             if "setu-auth" in cookie:
                 token = cookie["setu-auth"].value
 
-        # 2. Fallback to query parameter (backwards compatibility / dev testing)
+        # 2. Extract token from subprotocols (Secure cross-origin standard)
+        if not token:
+            subprotocols = scope.get("subprotocols", [])
+            for sub in subprotocols:
+                if sub.startswith("access_token,"):
+                    token = sub.split(",")[1]
+                    break
+                # Standard frontend WebSocket subprotocol array often joins as string or passes as list
+                elif sub == "access_token":
+                    # The next subprotocol might be the token itself depending on ASGI server implementation
+                    idx = subprotocols.index(sub)
+                    if len(subprotocols) > idx + 1:
+                        token = subprotocols[idx+1]
+                        break
+
+        # 3. Fallback to query parameter (backwards compatibility / dev testing)
         if not token:
             query_string = scope.get("query_string", b"").decode("utf-8")
             query_params = parse_qs(query_string)

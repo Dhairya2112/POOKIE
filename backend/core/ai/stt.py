@@ -1,9 +1,10 @@
-import numpy as np
-import os
-import psutil
 import gc
+import os
+
+import numpy as np
 import torch
 from faster_whisper import WhisperModel
+
 
 class STTPipeline:
     def __init__(self, model_size=None, device="cpu"):
@@ -37,7 +38,7 @@ class STTPipeline:
             gc.collect()
             
             # Clear CUDA cache if applicable
-            if self.device == "cuda" and torch.cuda.is_available():
+            if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             print("Memory cleared successfully.")
 
@@ -51,11 +52,7 @@ class STTPipeline:
         # audio_data should be float32 array
         
         # Bilingual prompt priming Whisper for terminology, names, and code-switching
-        bilingual_prompt = (
-            "Setu, open VS Code. Launch Google Chrome. Hey Setu, what time is it? "
-            "मुझे आज की खबरें बताओ। रिमाइंड मी एट 6 PM. Volume up. Search for python. "
-            "Aise tu, Setu."
-        )
+        bilingual_prompt = "Setu, open VS Code. मुझे खबरें बताओ। रिमाइंड मी। Aise tu, Setu."
         
         try:
             segments, info = self.model.transcribe(

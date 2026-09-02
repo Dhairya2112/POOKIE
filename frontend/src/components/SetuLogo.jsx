@@ -1,4 +1,3 @@
-
 export function SetuLogo({ size = 24, className = "" }) {
   return (
     <svg
@@ -10,7 +9,14 @@ export function SetuLogo({ size = 24, className = "" }) {
       className={className}
     >
       <defs>
-        <linearGradient id="setu-logo-grad" x1="2" y1="2" x2="22" y2="22" gradientUnits="userSpaceOnUse">
+        <linearGradient
+          id="setu-logo-grad"
+          x1="2"
+          y1="2"
+          x2="22"
+          y2="22"
+          gradientUnits="userSpaceOnUse"
+        >
           <stop offset="0%" stopColor="#8052ff" />
           <stop offset="50%" stopColor="#a78bfa" />
           <stop offset="100%" stopColor="#c084fc" />

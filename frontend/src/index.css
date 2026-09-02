@@ -2,28 +2,26 @@
 
 @theme {
   /* Colors - Professional App Palette */
-  --color-bg-base: #030303;        /* Deepest Obsidian */
-  --color-bg-surface: #09090b;     /* Slate Dark Gray (zinc-950) */
+  --color-bg-base: #030303; /* Deepest Obsidian */
+  --color-bg-surface: #09090b; /* Slate Dark Gray (zinc-950) */
   --color-bg-surface-hover: #18181b;
-  
-  --color-accent-mint: #8052ff;    /* Plum Voltage - primary brand color */
-  --color-accent-lime: #ffb829;    /* Amber Spark */
-  --color-accent-purple: #c084fc;  /* Iridescent Violet */
-  --color-accent-cyan: #15846e;    /* Lichen Green */
-  
-  --color-text-primary: #f4f4f5;   /* Crisp off-white */
+
+  --color-accent-mint: #8052ff; /* Plum Voltage - primary brand color */
+  --color-accent-lime: #ffb829; /* Amber Spark */
+  --color-accent-purple: #c084fc; /* Iridescent Violet */
+  --color-accent-cyan: #15846e; /* Lichen Green */
+
+  --color-text-primary: #f4f4f5; /* Crisp off-white */
   --color-text-secondary: #a1a1aa; /* Zinc-400 */
-  --color-text-muted: #52525b;     /* Zinc-600 */
-  
+  --color-text-muted: #52525b; /* Zinc-600 */
+
   --color-border: rgba(255, 255, 255, 0.06);
 
   /* Typography */
-  --font-acronym: 'Space Grotesk', ui-sans-serif, system-ui;
+  --font-acronym: "Space Grotesk", ui-sans-serif, system-ui;
   --font-display: var(--font-acronym);
   --font-body: var(--font-acronym);
   --font-sans: var(--font-acronym);
-
-
 
   /* Border Radius */
   --radius-3xl: 24px;
@@ -47,8 +45,14 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-*, html, body, button, input, select, textarea {
-  font-family: 'Space Grotesk', sans-serif !important;
+*,
+html,
+body,
+button,
+input,
+select,
+textarea {
+  font-family: "Space Grotesk", sans-serif !important;
 }
 
 /* Custom Scrollbars */

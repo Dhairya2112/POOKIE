@@ -1,10 +1,12 @@
-from rest_framework.views import APIView
-from rest_framework.response import Response
 from rest_framework import status
-from .models import Conversation
-from .serializers import ConversationSerializer
-from core.users.auth import PyJWTAuthentication
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from core.users.auth import PyJWTAuthentication
+
+from .models import Conversation
+
 
 class ConversationListView(APIView):
     authentication_classes = [PyJWTAuthentication]
@@ -31,9 +33,10 @@ class ConversationListView(APIView):
             
         conversations = query.order_by('-started_at').skip(skip).limit(limit)
         
-        # We might not want to return all messages for the list view, just previews.
-        # But for simplicity, we return the full serialized objects.
-        serializer = ConversationSerializer(conversations, many=True)
+        # BUG-1 Fix: Use ConversationListSerializer to explicitly omit the 'messages' array, 
+        # avoiding gigabytes of memory exhaustion on active users.
+        from .serializers import ConversationListSerializer
+        serializer = ConversationListSerializer(conversations, many=True)
         return Response({
             'count': query.count(),
             'results': serializer.data
@@ -48,6 +51,7 @@ class ConversationDetailView(APIView):
         if not conversation:
             return Response({'error': {'code': 'NOT_FOUND', 'message': 'Conversation not found'}}, status=status.HTTP_404_NOT_FOUND)
             
+        from .serializers import ConversationSerializer
         return Response(ConversationSerializer(conversation).data)
         
     def delete(self, request, conversation_id):
@@ -56,4 +60,13 @@ class ConversationDetailView(APIView):
             return Response({'error': {'code': 'NOT_FOUND', 'message': 'Conversation not found'}}, status=status.HTTP_404_NOT_FOUND)
             
         conversation.delete()
+
+        # BUG-3 Fix: Clean up orphaned LangGraph checkpoints in the BoundedMemorySaver
+        from core.agent.state import get_agent
+        agent = get_agent()
+        if hasattr(agent, '_memory') and hasattr(agent._memory, 'storage'):
+            keys_to_delete = [k for k in agent._memory.storage.keys() if (isinstance(k, tuple) and k[0] == conversation_id) or k == conversation_id]
+            for k in keys_to_delete:
+                agent._memory.storage.pop(k, None)
+
         return Response(status=status.HTTP_204_NO_CONTENT)

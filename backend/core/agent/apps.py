@@ -1,6 +1,8 @@
-from django.apps import AppConfig
-import sys
 import os
+import sys
+
+from django.apps import AppConfig
+
 
 class AgentConfig(AppConfig):
     name = 'core.agent'
@@ -16,5 +18,6 @@ class AgentConfig(AppConfig):
         
         if not is_reloader:
             import threading
+
             from core.agent.state import init_models
             threading.Thread(target=init_models, daemon=True).start()

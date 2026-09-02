@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ReactLenis } from 'lenis/react';
 import { NeuralMesh } from '../components/NeuralMesh';
 import { gsap } from 'gsap';

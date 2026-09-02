@@ -1,7 +1,11 @@
 import json
+
+from concurrent.futures import ThreadPoolExecutor
+
 from channels.generic.websocket import AsyncWebsocketConsumer
 
 active_mobile_connections = {}
+_agent_executor = ThreadPoolExecutor(max_workers=10)
 
 class AgentStreamConsumer(AsyncWebsocketConsumer):
     async def connect(self):
@@ -14,6 +18,7 @@ class AgentStreamConsumer(AsyncWebsocketConsumer):
 
         # Ownership check: verify if conversation exists and belongs to another user
         from asgiref.sync import sync_to_async
+
         from core.conversations.models import Conversation
 
         @sync_to_async
@@ -43,7 +48,23 @@ class AgentStreamConsumer(AsyncWebsocketConsumer):
 
         await self.channel_layer.group_add(self.room_group_name, self.channel_name)
         await self.channel_layer.group_add(self.user_group_name, self.channel_name)
-        await self.accept()
+        
+        # Accept the connection with the required subprotocol to prevent browser 1006 aborts
+        accepted_subprotocol = None
+        subprotocols = self.scope.get("subprotocols", [])
+        if subprotocols:
+            if "access_token" in subprotocols:
+                accepted_subprotocol = "access_token"
+            elif any(sub.startswith("access_token,") for sub in subprotocols):
+                accepted_subprotocol = next(sub for sub in subprotocols if sub.startswith("access_token,"))
+                
+        await self.accept(subprotocol=accepted_subprotocol)
+
+        # Mark user online in cache for the reminder system
+        import asyncio
+
+        from django.core.cache import cache
+        await asyncio.to_thread(cache.set, f"user_online_{self.user_id}", True, 86400)
 
         # Extract User-Agent for device name
         user_agent = ""
@@ -96,6 +117,11 @@ class AgentStreamConsumer(AsyncWebsocketConsumer):
                 del active_mobile_connections[self.user_id]
                 
         if hasattr(self, 'user_group_name'):
+            import asyncio
+
+            from django.core.cache import cache
+            await asyncio.to_thread(cache.delete, f"user_online_{self.user_id}")
+            
             await self.channel_layer.group_send(
                 self.user_group_name,
                 {
@@ -171,12 +197,12 @@ class AgentStreamConsumer(AsyncWebsocketConsumer):
             audio_base64 = data.get('audio')
 
             if audio_base64:
-                import os
                 import base64
                 import io
+                import os
+
                 import numpy as np
                 import soundfile as sf
-                from core.ai.stt import STTPipeline
 
                 try:
                     # Send instant acknowledgment
@@ -188,107 +214,119 @@ class AgentStreamConsumer(AsyncWebsocketConsumer):
                     # Decode base64 audio
                     audio_bytes = base64.b64decode(audio_base64)
 
-                    if True: # Previously redundant try block
-                        # Load using soundfile from memory buffer
-                        audio_io = io.BytesIO(audio_bytes)
-                        data, samplerate = sf.read(audio_io)
+                    # Load using soundfile from memory buffer
+                    audio_io = io.BytesIO(audio_bytes)
+                    data, samplerate = sf.read(audio_io)
 
-                        # Convert to mono if stereo
-                        if len(data.shape) > 1:
-                            data = np.mean(data, axis=1)
+                    # Convert to mono if stereo
+                    if len(data.shape) > 1:
+                        data = np.mean(data, axis=1)
 
-                        if samplerate != 16000:
-                            import torch
-                            import torchaudio.transforms as T
-                            tensor_audio = torch.from_numpy(data).float()
-                            resampler = T.Resample(orig_freq=samplerate, new_freq=16000)
-                            data = resampler(tensor_audio).numpy()
+                    if samplerate != 16000:
+                        import torch
+                        import torchaudio.transforms as T
+                        tensor_audio = torch.from_numpy(data).float()
+                        resampler = T.Resample(orig_freq=samplerate, new_freq=16000)
+                        data = resampler(tensor_audio).numpy()
 
-                        # Ensure float32 format
-                        audio_float32 = data.astype(np.float32)
+                    # Ensure float32 format
+                    audio_float32 = data.astype(np.float32)
 
-                        # Transcribe using pipeline
-                        from core.agent.state import get_stt
-                        stt = get_stt()
-                        text_command, _, avg_logprob = stt.transcribe(audio_float32)
-                        print(f"Websocket STT Transcribed: {text_command}")
+                    # Transcribe using pipeline (Run in thread to avoid blocking ASGI loop: BUG-14)
+                    import asyncio
 
-                        # Confidence / length gate
-                        import os
+                    from core.agent.state import get_stt
+                    
+                    stt = get_stt()
+                    text_command, _, avg_logprob = await asyncio.to_thread(
+                        stt.transcribe, audio_float32
+                    )
+                    print(f"Websocket STT Transcribed: {text_command}")
+
+                    # Confidence / length gate
+                    import os
+                    try:
+                        min_logprob = float(os.getenv("STT_MIN_LOGPROB", "-1.50"))
+                    except ValueError:
+                        min_logprob = -1.50
+
+                    is_valid = True
+                    if not text_command.strip() or len(text_command.strip()) < 2:
+                        is_valid = False
+                    elif avg_logprob < min_logprob:
+                        print(f"STT gate: Discarding low-confidence transcription '{text_command}' (avg_logprob={avg_logprob:.3f} < {min_logprob})")
+                        is_valid = False
+
+                    if not is_valid:
+                        fallback_msg = "Sorry, I didn't catch that."
+                        await self.send(text_data=json.dumps({
+                            'chunk_type': 'status',
+                            'message': 'thinking'
+                        }))
+                        await self.send(text_data=json.dumps({
+                            'chunk_type': 'text',
+                            'message': fallback_msg
+                        }))
                         try:
-                            min_logprob = float(os.getenv("STT_MIN_LOGPROB", "-1.50"))
-                        except ValueError:
-                            min_logprob = -1.50
-
-                        is_valid = True
-                        if not text_command.strip() or len(text_command.strip()) < 2:
-                            is_valid = False
-                        elif avg_logprob < min_logprob:
-                            print(f"STT gate: Discarding low-confidence transcription '{text_command}' (avg_logprob={avg_logprob:.3f} < {min_logprob})")
-                            is_valid = False
-
-                        if not is_valid:
-                            fallback_msg = "Sorry, I didn't catch that."
-                            await self.send(text_data=json.dumps({
-                                'chunk_type': 'status',
-                                'message': 'thinking'
-                            }))
-                            await self.send(text_data=json.dumps({
-                                'chunk_type': 'text',
-                                'message': fallback_msg
-                            }))
-                            try:
-                                from core.agent.state import get_tts
-                                from core.agent.pipeline import _get_user_prefs
+                            from core.agent.pipeline import _get_user_prefs
+                            from core.agent.state import get_tts
+                            
+                            def _generate_fallback():
                                 prefs = _get_user_prefs(self.scope["user"].user_id)
-                                audio_b64 = get_tts().generate_base64(fallback_msg, voice=prefs['voice'], speed=prefs['speed'])
-                                if audio_b64:
-                                    await self.send(text_data=json.dumps({
-                                        'chunk_type': 'audio',
-                                        'message': audio_b64
-                                    }))
-                            except Exception as e:
-                                print(f"Error generating fallback TTS: {e}")
+                                return get_tts().generate_base64(fallback_msg, voice=prefs['voice'], speed=prefs['speed'])
+                                
+                            audio_b64 = await asyncio.to_thread(_generate_fallback)
+                            
+                            if audio_b64:
+                                await self.send(text_data=json.dumps({
+                                    'chunk_type': 'audio',
+                                    'message': audio_b64
+                                }))
+                        except Exception as e:
+                            print(f"Error generating fallback TTS: {e}")
 
-                            await self.send(text_data=json.dumps({
-                                'chunk_type': 'status',
-                                'message': 'done'
-                            }))
-                            # Clean up file in finally
-                            return
+                        await self.send(text_data=json.dumps({
+                            'chunk_type': 'status',
+                            'message': 'done'
+                        }))
+                        # Clean up file in finally
+                        return
 
-                        if text_command.strip():
-                            # Broadcast transcribed command to all devices in this conversation
-                            await self.channel_layer.group_send(
-                                self.room_group_name,
-                                {
-                                    'type': 'agent_message',
-                                    'chunk_type': 'text_user',
-                                    'message': text_command,
-                                    'sender_id': self.connection_id,
-                                    'is_audio_transcription': True,
-                                    'source': 'mobile' if is_mobile else 'desktop'
-                                }
+                    if text_command.strip():
+                        # Broadcast transcribed command to all devices in this conversation
+                        await self.channel_layer.group_send(
+                            self.room_group_name,
+                            {
+                                'type': 'agent_message',
+                                'chunk_type': 'text_user',
+                                'message': text_command,
+                                'sender_id': self.connection_id,
+                                'is_audio_transcription': True,
+                                'source': 'mobile' if is_mobile else 'desktop'
+                            }
+                        )
+
+                        # Trigger agent command process task
+                        import asyncio
+
+                        from core.agent.pipeline import process_agent_command
+                        loop = asyncio.get_running_loop()
+                        asyncio.create_task(
+                            loop.run_in_executor(
+                                _agent_executor,
+                                process_agent_command,
+                                text_command,
+                                self.conversation_id,
+                                self.scope["user"].user_id,
+                                self.room_group_name
                             )
-
-                            # Trigger agent command process task
-                            import asyncio
-                            from core.agent.pipeline import process_agent_command
-                            asyncio.create_task(
-                                asyncio.to_thread(
-                                    process_agent_command,
-                                    text_command,
-                                    self.conversation_id,
-                                    self.scope["user"].user_id,
-                                    self.room_group_name
-                                )
-                            )
-                        else:
-                            await self.send(text_data=json.dumps({
-                                'chunk_type': 'status',
-                                'message': 'done'
-                            }))
-                        # (No file cleanup needed for in-memory buffer)
+                        )
+                    else:
+                        await self.send(text_data=json.dumps({
+                            'chunk_type': 'status',
+                            'message': 'done'
+                        }))
+                    # (No file cleanup needed for in-memory buffer)
                 except Exception as e:
                     print(f"Error transcribing websocket audio: {e}")
                     await self.send(text_data=json.dumps({
@@ -318,9 +356,12 @@ class AgentStreamConsumer(AsyncWebsocketConsumer):
                 )
 
                 import asyncio
+
                 from core.agent.pipeline import process_agent_command
+                loop = asyncio.get_running_loop()
                 asyncio.create_task(
-                    asyncio.to_thread(
+                    loop.run_in_executor(
+                        _agent_executor,
                         process_agent_command,
                         command_text,
                         self.conversation_id,

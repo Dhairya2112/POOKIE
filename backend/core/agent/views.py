@@ -1,12 +1,15 @@
 # pyrefly: ignore [missing-import]
-from rest_framework.views import APIView
-# pyrefly: ignore [missing-import]
-from rest_framework.response import Response
+import uuid
+
 # pyrefly: ignore [missing-import]
 from rest_framework import status
-import uuid
-from core.users.auth import PyJWTAuthentication
 from rest_framework.permissions import IsAuthenticated
+# pyrefly: ignore [missing-import]
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from core.users.auth import PyJWTAuthentication
+
 
 class CommandView(APIView):
     authentication_classes = [PyJWTAuthentication]
@@ -25,12 +28,25 @@ class CommandView(APIView):
         if not conversation_id:
             conversation_id = str(uuid.uuid4())
 
-        from .pipeline import process_agent_command
         import threading
+
+        from django.core.cache import cache
+
+        from .pipeline import process_agent_command
         task_id = str(uuid.uuid4())
+        
+        # BUG-2 FIX: Initialize task state in the central cache before launching thread
+        cache.set(f"task_status_{task_id}", {"status": "processing", "result": None}, timeout=3600)
+
+        def run_task():
+            try:
+                process_agent_command(text, conversation_id, request.user.user_id)
+                cache.set(f"task_status_{task_id}", {"status": "completed", "result": "Task finished successfully"}, timeout=3600)
+            except Exception as e:
+                cache.set(f"task_status_{task_id}", {"status": "failed", "result": str(e)}, timeout=3600)
+
         threading.Thread(
-            target=process_agent_command,
-            args=(text, conversation_id, request.user.user_id),
+            target=run_task,
             daemon=True
         ).start()
         
@@ -51,11 +67,18 @@ class StatusView(APIView):
     permission_classes = [IsAuthenticated]
     
     def get(self, request, task_id):
-        # MOCK RESPONSE
+        from django.core.cache import cache
+
+        # BUG-2 FIX: Retrieve actual task state from cache instead of hardcoded mock
+        task_info = cache.get(f"task_status_{task_id}")
+        
+        if not task_info:
+            return Response({'error': {'code': 'NOT_FOUND', 'message': 'Task not found or expired.'}}, status=status.HTTP_404_NOT_FOUND)
+            
         return Response({
             "task_id": task_id,
-            "status": "pending",
-            "result": None
+            "status": task_info["status"],
+            "result": task_info.get("result")
         })
 
 class CommandLogListView(APIView):

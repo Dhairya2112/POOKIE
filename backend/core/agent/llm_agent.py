@@ -8,38 +8,75 @@ Layer 3: NVIDIA NIM (meta/llama-3.1-8b-instruct)    — final fallback
 All three share the same tool registry and conversation memory.
 """
 
-import os
 import logging
+import os
 import platform
 import re
-import functools
 
+from dotenv import load_dotenv
 from langchain_core.messages import ToolMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_nvidia_ai_endpoints import ChatNVIDIA
+from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.prebuilt import create_react_agent
+
 from .state import is_cancelled
 from .tools import _get_conversation_id
 
-from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
-from langchain_nvidia_ai_endpoints import ChatNVIDIA
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langgraph.prebuilt import create_react_agent
-from langgraph.checkpoint.memory import MemorySaver
 
 class BoundedMemorySaver(MemorySaver):
+    """
+    MemorySaver that caps checkpoint history PER CONVERSATION THREAD.
+
+    The default MemorySaver keeps every checkpoint forever, which is a memory
+    leak for long-running servers.  The original implementation pruned by
+    *global* key count, meaning a burst of new conversations could evict
+    checkpoints belonging to other active conversations mid-stream.
+
+    This version groups storage entries by thread_id and evicts only within
+    each thread, so one conversation can never corrupt another's state.
+    """
+    MAX_CHECKPOINTS_PER_THREAD = 50
+
     def put(self, *args, **kwargs):
         res = super().put(*args, **kwargs)
-        if hasattr(self, "storage") and len(self.storage) > 50:
-            keys = list(self.storage.keys())
-            for k in keys[:-50]:
-                del self.storage[k]
+        try:
+            storage = self.storage  # MemorySaver internal: dict keyed by (thread_id, checkpoint_id, ...)
+        except AttributeError:
+            # LangGraph renamed the internal store — pruning is skipped but
+            # correctness is preserved; log once so we notice in tests.
+            import logging
+            logging.getLogger("core.agent").warning(
+                "BoundedMemorySaver: could not access .storage — "
+                "memory pruning is disabled. Check LangGraph version."
+            )
+            return res
+
+        # Group keys by thread_id (first element of the tuple key)
+        from collections import defaultdict
+        by_thread = defaultdict(list)
+        for key in list(storage.keys()):
+            thread_id = key[0] if isinstance(key, tuple) else key
+            by_thread[thread_id].append(key)
+
+        # Prune oldest checkpoints within each thread independently
+        for thread_id, keys in by_thread.items():
+            if len(keys) > self.MAX_CHECKPOINTS_PER_THREAD:
+                # Keys are in insertion order (Python 3.7+ dict) — drop the oldest
+                to_delete = keys[:len(keys) - self.MAX_CHECKPOINTS_PER_THREAD]
+                for k in to_delete:
+                    storage.pop(k, None)
+
         return res
 
-from langchain_core.globals import set_llm_cache
-from langchain_core.caches import InMemoryCache
+
 from langchain_core.callbacks import BaseCallbackHandler
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
+from tenacity import (retry, retry_if_exception, stop_after_attempt,
+                      wait_exponential)
 
 from .tools import ALL_TOOLS, set_tool_context
+
 
 class BrainTracker(BaseCallbackHandler):
     def __init__(self):
@@ -70,9 +107,9 @@ class BrainTracker(BaseCallbackHandler):
 
 brain_tracker = BrainTracker()
 
+import aiohttp
 # ── Targeted Monkey Patches for NVIDIA NIM Timeout ─────────────────────────
 import requests
-import aiohttp
 
 _orig_request = requests.Session.request
 def _patched_request(self, method, url, *args, **kwargs):
@@ -117,8 +154,8 @@ def is_retryable_exception(exception) -> bool:
         return False
     return True
 
-# Layer 1 — In-memory response cache (zero-latency for identical queries)
-set_llm_cache(InMemoryCache())
+# Note: Global LLM cache intentionally disabled to prevent cross-user privacy leaks.
+# See BUG-04. Let LangGraph handle per-user memory via checkpointer.
 
 _OS_NAME = f"{platform.system()} {platform.release()}"
 _HOME_DIR = os.path.expanduser("~")
@@ -178,10 +215,28 @@ class SetuAgent:
             logger.warning("GEMINI_API_KEY is not set — primary LLM will fail.")
         if not os.getenv("OPENROUTER_API_KEY"):
             logger.warning("OPENROUTER_API_KEY is not set — secondary LLM will fail.")
-        if not os.getenv("NVIDIA_API_KEY"):
-            logger.warning("NVIDIA_API_KEY is not set — tertiary LLM will fail.")
+        # Create a new list of wrapped tools to prevent mutating global tool instances
+        self.tools = []
+        for orig_tool in ALL_TOOLS:
+            from copy import copy
+            new_tool = copy(orig_tool)
+            original_run = new_tool._run
+            def make_wrapper(run_func):
+                import functools
+                @functools.wraps(run_func)
+                def wrapped_run(*args, **kwargs):
+                    conv_id = _get_conversation_id()
+                    if is_cancelled(conv_id):
+                        return "Command cancelled by user."
+                    res = run_func(*args, **kwargs)
+                    if is_cancelled(conv_id):
+                        return "Command cancelled by user."
+                    return res
+                return wrapped_run
+            
+            new_tool._run = make_wrapper(original_run)
+            self.tools.append(new_tool)
 
-        self.tools = ALL_TOOLS
         self.memory = BoundedMemorySaver()
 
         # Layer 1: Google Gemini Flash (10s timeout to meet API limits)
@@ -197,11 +252,11 @@ class SetuAgent:
             checkpointer=self.memory
         )
 
-        # Layer 2: OpenRouter (free Gemma 4 31B, 6s timeout)
+        # Layer 2: OpenRouter (Gemma 2 27B, 6s timeout)
         self.fallback_llm = ChatOpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=os.getenv("OPENROUTER_API_KEY", "dummy"),
-            model="google/gemma-4-31b-it:free",
+            model="google/gemma-2-27b-it:free",
             timeout=6,
             streaming=True
         )
@@ -222,35 +277,22 @@ class SetuAgent:
             checkpointer=self.memory
         )
 
-        # Wrap tools to intercept and check for cancellation, preventing duplicate wrapping
-        for orig_tool in self.tools:
-            if not getattr(orig_tool, "_cancellation_wrapped", False):
-                original_run = orig_tool._run
-                def make_wrapper(run_func):
-                    @functools.wraps(run_func)
-                    def wrapped_run(*args, **kwargs):
-                        conv_id = _get_conversation_id()
-                        if is_cancelled(conv_id):
-                            return "Command cancelled by user."
-                        res = run_func(*args, **kwargs)
-                        if is_cancelled(conv_id):
-                            return "Command cancelled by user."
-                        return res
-                    return wrapped_run
-                
-                orig_tool._run = make_wrapper(original_run)
-                orig_tool._cancellation_wrapped = True
-
-        logger.info("Setu Agent ready — %d tools registered.", len(self.tools))
-
-    def _heal_checkpoint(self, conversation_id: str):
+    def _heal_checkpoint(self, conversation_id: str, agent=None):
         """
         Check if the last message is an AI message with dangling tool calls.
         If so, append a placeholder ToolMessage to prevent the checkpoint from being poisoned.
+
+        Args:
+            conversation_id: The thread whose checkpoint to inspect.
+            agent: The LangGraph agent to use for get_state / update_state.
+                   Defaults to primary_agent.  Pass the agent that is about
+                   to resume so the write uses the correct graph context.
         """
+        if agent is None:
+            agent = self.primary_agent
         config = {"configurable": {"thread_id": conversation_id}}
         try:
-            state = self.primary_agent.get_state(config)
+            state = agent.get_state(config)
             messages = state.values.get("messages", [])
             if not messages:
                 return
@@ -265,16 +307,26 @@ class SetuAgent:
                         name=tc.get("name", "unknown_tool"),
                         tool_call_id=tc.get("id")
                     ))
-                self.primary_agent.update_state(config, {"messages": placeholders}, as_node="agent")
+                agent.update_state(config, {"messages": placeholders}, as_node="agent")
                 logger.info("Conversation %s checkpoint healed successfully.", conversation_id)
         except Exception as e:
             logger.warning("Failed to heal checkpoint for conversation %s: %s", conversation_id, e)
 
-    def _get_stable_config(self, conversation_id: str) -> dict:
-        """Find the last checkpoint where it's safe to resume (either fully complete AI turn or just after tool execution)."""
+    def _get_stable_config(self, conversation_id: str, agent=None) -> dict:
+        """Find the last checkpoint where it's safe to resume (either fully complete AI turn or just after tool execution).
+
+        Args:
+            conversation_id: The thread to inspect.
+            agent: The LangGraph agent whose state history to walk.
+                   Defaults to primary_agent.  Pass the agent about to
+                   be invoked so that the returned checkpoint_id is
+                   resolved through the correct graph instance.
+        """
+        if agent is None:
+            agent = self.primary_agent
         config = {"configurable": {"thread_id": conversation_id}}
         try:
-            for i, state in enumerate(self.primary_agent.get_state_history(config)):
+            for i, state in enumerate(agent.get_state_history(config)):
                 messages = state.values.get("messages", [])
                 if messages:
                     last_msg = messages[-1]
@@ -315,6 +367,7 @@ class SetuAgent:
                             }
         except Exception as e:
             logger.warning("Failed to query state history for stable config: %s", e)
+        logger.warning("No stable checkpoint found for conversation %s. Resuming from unrecoverable base config.", conversation_id)
         return config
 
     @retry(
@@ -371,8 +424,11 @@ class SetuAgent:
             logger.warning("Primary LLM (Gemini) failed: %s — trying fallback.", e)
 
         # Layer 2: OpenRouter
+        # Heal any checkpoint that Layer 1 may have poisoned mid-stream
+        # (e.g. an AIMessage with dangling tool_calls written before the crash).
+        self._heal_checkpoint(conversation_id, agent=self.fallback_agent)
         try:
-            stable_config = self._get_stable_config(conversation_id)
+            stable_config = self._get_stable_config(conversation_id, agent=self.fallback_agent)
             result = self.fallback_agent.invoke(
                 None, config=stable_config
             )
@@ -385,8 +441,10 @@ class SetuAgent:
             logger.warning("Secondary LLM (OpenRouter) failed: %s — trying tertiary.", e)
 
         # Layer 3: NVIDIA NIM
+        # Heal again — Layer 2 may have left its own dangling checkpoint.
+        self._heal_checkpoint(conversation_id, agent=self.tertiary_agent)
         try:
-            stable_config = self._get_stable_config(conversation_id)
+            stable_config = self._get_stable_config(conversation_id, agent=self.tertiary_agent)
             result = self.tertiary_agent.invoke(
                 None, config=stable_config
             )
@@ -459,47 +517,64 @@ Output ONLY the exact tool name(s) as a comma-separated list on the final line. 
             logger.warning("Router failed, using original input: %s", e)
             routed_input = user_input
 
-        # Layer 1: Google Gemini (with Tenacity retry)
-        try:
-            # stream_mode="messages" streams message chunks
-            for message, metadata in self.primary_agent.stream(
-                {"messages": [("user", routed_input)]},
-                config=run_config,
-                stream_mode="messages"
-            ):
-                if is_cancelled(conversation_id):
-                    raise RuntimeError("Command cancelled by user.")
+        # Layer 1: Google Gemini (with manual retry)
+        max_retries = 2
+        success = False
+        for attempt in range(max_retries + 1):
+            try:
+                stream_config = run_config if attempt == 0 else self._get_stable_config(conversation_id, agent=self.primary_agent)
+                stream_input = {"messages": [("user", routed_input)]} if attempt == 0 else None
+                # stream_mode="messages" streams message chunks
+                for message, metadata in self.primary_agent.stream(
+                    stream_input,
+                    config=stream_config,
+                    stream_mode="messages"
+                ):
+                    if is_cancelled(conversation_id):
+                        raise RuntimeError("Command cancelled by user.")
 
-                node = metadata.get("langgraph_node")
-                tool_name = None
-                if node == "tools":
-                    if hasattr(message, "name") and message.name:
-                        tool_name = message.name
-                elif hasattr(message, "tool_calls") and message.tool_calls:
-                    tool_name = message.tool_calls[0].get("name")
+                    node = metadata.get("langgraph_node")
+                    tool_name = None
+                    if node == "tools":
+                        if hasattr(message, "name") and message.name:
+                            tool_name = message.name
+                    elif hasattr(message, "tool_calls") and message.tool_calls:
+                        tool_name = message.tool_calls[0].get("name")
 
-                if tool_name:
-                    set_status(f"executing:{tool_name}")
-                elif node == "agent" and message.content:
-                    if not getattr(message, "tool_calls", None) and not getattr(message, "tool_call_chunks", None):
-                        set_status("composing")
-                        text_chunk = self._get_text_content(message.content)
-                        if text_chunk:
-                            yield text_chunk
+                    if tool_name:
+                        set_status(f"executing:{tool_name}")
+                    elif node == "agent" and message.content:
+                        if not getattr(message, "tool_calls", None) and not getattr(message, "tool_call_chunks", None):
+                            set_status("composing")
+                            text_chunk = self._get_text_content(message.content)
+                            if text_chunk:
+                                yield text_chunk
+                success = True
+                break
+            except Exception as e:
+                if is_cancelled(conversation_id) or "cancelled by user" in str(e).lower():
+                    raise
+                err_str = str(e).lower()
+                if "safety" in err_str or "blocked" in err_str or "content_filter" in err_str:
+                    logger.warning("Safety filter triggered on Primary LLM: %s", e)
+                    yield "I can't help with that request."
+                    return
+                if attempt < max_retries:
+                    logger.warning("Primary LLM (Gemini) streaming failed (attempt %d): %s — retrying.", attempt + 1, e)
+                    self._heal_checkpoint(conversation_id, agent=self.primary_agent)
+                    import time
+                    time.sleep(2 ** attempt)
+                else:
+                    logger.warning("Primary LLM (Gemini) streaming failed after %d attempts: %s — trying fallback.", max_retries + 1, e)
+        
+        if success:
             return
-        except Exception as e:
-            if is_cancelled(conversation_id) or "cancelled by user" in str(e).lower():
-                raise
-            err_str = str(e).lower()
-            if "safety" in err_str or "blocked" in err_str or "content_filter" in err_str:
-                logger.warning("Safety filter triggered on Primary LLM: %s", e)
-                yield "I can't help with that request."
-                return
-            logger.warning("Primary LLM (Gemini) streaming failed: %s — trying fallback.", e)
 
         # Layer 2: OpenRouter
+        # Heal any checkpoint poisoned by Layer 1's failed stream before resuming.
+        self._heal_checkpoint(conversation_id, agent=self.fallback_agent)
         try:
-            stable_config = self._get_stable_config(conversation_id)
+            stable_config = self._get_stable_config(conversation_id, agent=self.fallback_agent)
             for message, metadata in self.fallback_agent.stream(
                 None,
                 config=stable_config,
@@ -536,8 +611,10 @@ Output ONLY the exact tool name(s) as a comma-separated list on the final line. 
             logger.warning("Secondary LLM (OpenRouter) streaming failed: %s — trying tertiary.", e)
 
         # Layer 3: NVIDIA NIM
+        # Heal again — Layer 2 may have left its own dangling checkpoint.
+        self._heal_checkpoint(conversation_id, agent=self.tertiary_agent)
         try:
-            stable_config = self._get_stable_config(conversation_id)
+            stable_config = self._get_stable_config(conversation_id, agent=self.tertiary_agent)
             for message, metadata in self.tertiary_agent.stream(
                 None,
                 config=stable_config,

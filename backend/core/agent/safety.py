@@ -1,5 +1,4 @@
 
-import re
 import platform
 from pathlib import Path
 
@@ -26,8 +25,12 @@ def is_command_blocked(command: str) -> bool:
         if not tokens:
             continue
             
-        # Skip benign command wrappers to expose the true root command
-        wrapper_cmds = {"env", "nohup", "time", "xargs", "watch", "timeout"}
+        # Skip benign command wrappers and shells to expose the true root command
+        wrapper_cmds = {
+            "env", "nohup", "time", "xargs", "watch", "timeout",
+            "cmd", "powershell", "pwsh", "bash", "sh", "wsl",
+            "/c", "-c", "-command", "-noexit", "-noprofile"
+        }
         
         root_idx = 0
         root_cmd = ""
@@ -38,9 +41,11 @@ def is_command_blocked(command: str) -> bool:
             # Strip paths (e.g. c:/windows/system32/format.exe -> format.exe)
             root_cmd = root_cmd.replace("\\", "/").split("/")[-1]
             
-            # Strip extensions (e.g. format.exe -> format)
-            if root_cmd.endswith(".exe") or root_cmd.endswith(".com"):
-                root_cmd = root_cmd[:-4]
+            # Strip extensions to correctly match against blocklist
+            for ext in [".exe", ".com", ".bat", ".cmd", ".ps1", ".vbs", ".sh", ".bin"]:
+                if root_cmd.endswith(ext):
+                    root_cmd = root_cmd[:-len(ext)]
+                    break
                 
             if root_cmd in wrapper_cmds:
                 root_idx += 1
@@ -63,11 +68,15 @@ def is_command_blocked(command: str) -> bool:
                 return True
                 
         # Block disk/system manipulation
-        if root_cmd in ["format", "mkfs", "diskpart", "dd", "bcdedit", "cipher"]:
+        if root_cmd in ["format", "mkfs", "diskpart", "dd", "bcdedit", "cipher", "clear-disk", "initialize-disk"]:
             return True
             
         # Block shutdown/reboot
-        if root_cmd in ["shutdown", "reboot", "init"]:
+        if root_cmd in ["shutdown", "reboot", "init", "stop-computer", "restart-computer", "suspend-computer"]:
+            return True
+                    
+        # Block security downgrades
+        if root_cmd in ["set-executionpolicy"]:
             return True
                     
         # Block obfuscated/remote powershell execution

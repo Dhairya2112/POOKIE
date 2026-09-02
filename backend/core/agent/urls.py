@@ -1,5 +1,6 @@
 from django.urls import path
-from .views import CommandView, StatusView, CommandLogListView
+
+from .views import CommandLogListView, CommandView, StatusView
 
 urlpatterns = [
     path('command/', CommandView.as_view(), name='agent_command'),

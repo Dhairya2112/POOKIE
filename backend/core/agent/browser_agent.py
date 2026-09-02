@@ -1,22 +1,46 @@
 import os
+
 from dotenv import load_dotenv
+
 load_dotenv()
 
-import uuid
 import logging
-import functools
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langgraph.prebuilt import create_react_agent
-from langgraph.checkpoint.memory import MemorySaver
+import uuid
+
 from langchain_core.tools import tool
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.prebuilt import create_react_agent
+
 
 class BoundedMemorySaver(MemorySaver):
+    """Per-thread bounded checkpoint store — same implementation as in llm_agent.py."""
+    MAX_CHECKPOINTS_PER_THREAD = 50
+
     def put(self, *args, **kwargs):
         res = super().put(*args, **kwargs)
-        if hasattr(self, "storage") and len(self.storage) > 50:
-            keys = list(self.storage.keys())
-            for k in keys[:-50]:
-                del self.storage[k]
+        try:
+            storage = self.storage
+        except AttributeError:
+            import logging
+            logging.getLogger("core.agent.browser_agent").warning(
+                "BoundedMemorySaver: could not access .storage — "
+                "memory pruning is disabled. Check LangGraph version."
+            )
+            return res
+
+        from collections import defaultdict
+        by_thread = defaultdict(list)
+        for key in list(storage.keys()):
+            thread_id = key[0] if isinstance(key, tuple) else key
+            by_thread[thread_id].append(key)
+
+        for thread_id, keys in by_thread.items():
+            if len(keys) > self.MAX_CHECKPOINTS_PER_THREAD:
+                to_delete = keys[:len(keys) - self.MAX_CHECKPOINTS_PER_THREAD]
+                for k in to_delete:
+                    storage.pop(k, None)
+
         return res
 
 from .browser import BrowserManager
@@ -29,7 +53,6 @@ browser_mgr = BrowserManager()
 
 class CancelledException(Exception):
     """Raised when the user cancels the operation to instantly abort LangGraph."""
-    pass
 
 # --- Internal Browser Tools for the Sub-Agent ---
 
@@ -66,23 +89,26 @@ def navigate(url: str) -> str:
 BROWSER_TOOLS = [read_screen, click_element, type_element, navigate]
 
 # Wrap tools for cancellation (so Orb cancel interrupts mid-browse)
+_wrapped_browser_tools = []
 for orig_tool in BROWSER_TOOLS:
-    if not getattr(orig_tool, "_cancellation_wrapped", False):
-        original_run = orig_tool._run
-        def make_wrapper(run_func):
-            @functools.wraps(run_func)
-            def wrapped_run(*args, **kwargs):
-                conv_id = conversation_id_var.get()
-                if is_cancelled(conv_id):
-                    raise CancelledException()
-                res = run_func(*args, **kwargs)
-                if is_cancelled(conv_id):
-                    raise CancelledException()
-                return res
-            return wrapped_run
-        
-        orig_tool._run = make_wrapper(original_run)
-        orig_tool._cancellation_wrapped = True
+    from copy import copy
+    new_tool = copy(orig_tool)
+    original_run = new_tool._run
+    def make_wrapper(run_func):
+        import functools
+        @functools.wraps(run_func)
+        def wrapped_run(*args, **kwargs):
+            conv_id = conversation_id_var.get()
+            if is_cancelled(conv_id):
+                raise CancelledException()
+            res = run_func(*args, **kwargs)
+            if is_cancelled(conv_id):
+                raise CancelledException()
+            return res
+        return wrapped_run
+    
+    new_tool._run = make_wrapper(original_run)
+    _wrapped_browser_tools.append(new_tool)
 
 # --- Browser Agent Setup ---
 
@@ -101,13 +127,13 @@ RULES:
 browser_memory = BoundedMemorySaver()
 
 browser_llm = ChatGoogleGenerativeAI(
-    model="gemini-3.1-flash-lite",
+    model="gemini-2.5-flash",
     google_api_key=os.getenv("GEMINI_API_KEY"),
     timeout=15
 )
 
 browser_graph = create_react_agent(
-    browser_llm, BROWSER_TOOLS,
+    browser_llm, _wrapped_browser_tools,
     prompt=BROWSER_PROMPT,
     checkpointer=browser_memory
 )

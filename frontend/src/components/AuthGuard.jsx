@@ -1,9 +1,16 @@
-import React, { useState, useEffect } from 'react';
-import { Navigate, useLocation } from 'react-router-dom';
-import { useAppStore } from '../store/useAppStore';
+import { useState, useEffect } from "react";
+import { Navigate, useLocation } from "react-router-dom";
+import { useAppStore } from "../store/useAppStore";
 
 export function AuthGuard({ children, requireOnboarding = true }) {
-  const { token, logout, setUsername, setOnboardingCompleted, onboardingCompleted, setEulaAccepted } = useAppStore();
+  const {
+    token,
+    logout,
+    setUsername,
+    setOnboardingCompleted,
+    onboardingCompleted,
+    setEulaAccepted,
+  } = useAppStore();
   const [isChecking, setIsChecking] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const location = useLocation();
@@ -23,26 +30,30 @@ export function AuthGuard({ children, requireOnboarding = true }) {
 
       // 2. Fetch profile if token exists, strictly wrapped in try/catch/finally
       try {
-        const res = await fetch(`http://${window.location.hostname}:8000/api/v1/user/profile/`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        });
+        const res = await fetch(
+          `${import.meta.env.VITE_API_BASE_URL || `http://${window.location.hostname}:8000`}/api/v1/user/profile/`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          },
+        );
 
         if (!res.ok) {
           throw new Error(`Authentication failed with status: ${res.status}`);
         }
 
         const data = await res.json();
-        
+
         if (isMounted) {
           // Sync profile data to store
           if (data && data.username) setUsername(data.username);
-          if (data?.preferences?.preferred_name) setUsername(data.preferences.preferred_name);
-          
+          if (data?.preferences?.preferred_name)
+            setUsername(data.preferences.preferred_name);
+
           if (data?.preferences?.privacy_consent_granted === true) {
-             setOnboardingCompleted(true);
-             setEulaAccepted(true);
+            setOnboardingCompleted(true);
+            setEulaAccepted(true);
           }
-          
+
           setIsAuthenticated(true);
         }
       } catch (err) {
@@ -69,11 +80,21 @@ export function AuthGuard({ children, requireOnboarding = true }) {
   if (isChecking) {
     return (
       <div className="flex flex-col items-center justify-center w-full h-full bg-[#030303] text-zinc-400">
-        <svg className="animate-spin w-8 h-8 mb-4 text-[#8052ff]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <svg
+          className="animate-spin w-8 h-8 mb-4 text-[#8052ff]"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
           <circle cx="12" cy="12" r="10" strokeOpacity="0.25"></circle>
           <path d="M12 2a10 10 0 0 1 10 10" strokeOpacity="1"></path>
         </svg>
-        <span className="text-[10px] tracking-widest font-mono uppercase">Verifying Session...</span>
+        <span className="text-[10px] tracking-widest font-mono uppercase">
+          Verifying Session...
+        </span>
       </div>
     );
   }
@@ -86,7 +107,7 @@ export function AuthGuard({ children, requireOnboarding = true }) {
   if (requireOnboarding && !onboardingCompleted) {
     return <Navigate to="/onboarding/name" replace />;
   }
-  
+
   if (!requireOnboarding && onboardingCompleted) {
     // If they finished onboarding, don't let them sit on the onboarding route
     return <Navigate to="/dashboard" replace />;

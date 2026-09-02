@@ -1,19 +1,17 @@
 
-import os
-import sys
-import glob
-import json
-import platform
-import subprocess
-import datetime
 import contextvars
-from pathlib import Path
-import time
-import shutil
+import datetime
+import json
 import logging
+import os
+import platform
+import shutil
+import subprocess
+import time
 import webbrowser
+from pathlib import Path
+
 import dateparser
-import uuid
 
 try:
     import psutil
@@ -21,8 +19,8 @@ except ImportError:
     psutil = None
 
 if platform.system() == "Windows":
-    import winreg
     import ctypes
+    import winreg
 
 # Map common names to actual executables or macOS App names
 APP_ALIASES: dict[str, list[str]] = {
@@ -66,18 +64,23 @@ def _get_gather_info_llm():
         _gather_info_llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite", google_api_key=os.getenv("GEMINI_API_KEY"), temperature=0)
     return _gather_info_llm
 
-from .safety import is_command_blocked, get_blocked_reason, is_path_allowed, sanitize_output
-from .permissions import check_permission, PERMISSION_DENIED_MSG
-from .models import CommandLog
-from core.users.models import User
-from core.reminders.models import Reminder
+from datetime import datetime, timezone
+
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
-from core.agent.state import register_permission_request, get_permission_status, clear_permission_request
-from datetime import datetime, timezone
-from duckduckgo_search import DDGS
+
+from core.agent.state import (clear_permission_request, get_permission_status,
+                              register_permission_request)
+from core.reminders.models import Reminder
+from core.users.models import User
+
+from .models import CommandLog
+from .permissions import PERMISSION_DENIED_MSG, check_permission
+from .safety import get_blocked_reason, is_path_allowed, sanitize_output
+
 if platform.system() == "Windows":
-    from ctypes import HRESULT, POINTER, c_float, c_int, c_bool, c_void_p, byref
+    from ctypes import (HRESULT, POINTER, byref, c_bool, c_float, c_int,
+                        c_void_p)
     from ctypes.wintypes import DWORD
 
 # ── ContextVars for user/conversation ID ──
@@ -125,11 +128,14 @@ def request_interactive_permission(target_path: str, action: str) -> bool:
     
     user_id = _get_user_id()
     
-    # 1. Check trust mode
-    if user_id != "local":
-        user = User.objects(user_id=user_id).first()
-        if user and user.preferences and getattr(user.preferences, 'trust_mode', False):
-            return True
+    # 1. Check trust mode and headless auto-deny
+    if user_id == "local":
+        # The headless local listener has no UI to click "Approve"
+        return False
+        
+    user = User.objects(user_id=user_id).first()
+    if user and user.preferences and getattr(user.preferences, 'trust_mode', False):
+        return True
             
     # 2. Trigger interactive websocket prompt
     request_id = uuid.uuid4().hex
@@ -164,7 +170,7 @@ def request_interactive_permission(target_path: str, action: str) -> bool:
 @tool
 def get_current_time(query: str = "") -> str:
     """Get the current date, time, and day of the week."""
-    now = datetime.datetime.now()
+    now = datetime.now()
     result = now.strftime("%A, %B %d, %Y — %I:%M %p")
     _log("get_current_time", query, result, "success")
     return result
@@ -198,8 +204,8 @@ def get_system_info(query: str = "") -> str:
     return sanitize_output(result)
 
 
-import re
 import ctypes
+
 
 def find_drive_by_label(target_label: str) -> str | None:
     """Scan all active Windows drives and return the drive path matching the volume label."""
@@ -353,9 +359,13 @@ def open_application(app_name: str, file_path: str = "") -> str:
         for candidate in candidates:
             try:
                 if platform.system() == "Windows":
-                    safe_candidate = candidate.replace("'", "''")
+                    import base64
+
+                    # Safely pass candidate by base64-encoding it to prevent any PowerShell injection
+                    b64_candidate = base64.b64encode(candidate.encode("utf-16le")).decode("utf-8")
                     ps_script = f"""
-                    $app = Get-StartApps | Where-Object {{ $_.Name -like '*{safe_candidate}*' }} | Select-Object -First 1
+                    $candidate = [System.Text.Encoding]::Unicode.GetString([System.Convert]::FromBase64String('{b64_candidate}'))
+                    $app = Get-StartApps | Where-Object {{ $_.Name -like "*$candidate*" }} | Select-Object -First 1
                     if ($app) {{ Write-Output $app.AppID }} else {{ Write-Output "" }}
                     """
                     res = subprocess.run(["powershell", "-NoProfile", "-Command", ps_script], capture_output=True, text=True, timeout=10)
@@ -566,30 +576,55 @@ def run_shell_command(command: str) -> str:
         return msg
 
     try:
-        shell_exe = True
-        result = subprocess.run(
-            command,
-            shell=shell_exe,
-            capture_output=True,
+        import platform
+        if platform.system() == "Windows":
+            exec_args = ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
+        else:
+            exec_args = ["bash", "-c", command]
+            
+        process = subprocess.Popen(
+            exec_args,
+            shell=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=30,
             cwd=str(Path.home()),
         )
+        
+        start_time = time.time()
+        from core.agent.state import is_cancelled
+        
+        while True:
+            try:
+                # Use a small timeout to poll for cancellation
+                out, err = process.communicate(timeout=0.5)
+                break
+            except subprocess.TimeoutExpired:
+                if time.time() - start_time > 30:
+                    process.kill()
+                    process.communicate() # Flush pipes
+                    msg = "Command timed out after 30 seconds."
+                    _log("run_shell_command", command, msg, "error")
+                    return msg
+                    
+                if is_cancelled(conversation_id_var.get()):
+                    process.kill()
+                    process.communicate()
+                    msg = "Command cancelled by user."
+                    _log("run_shell_command", command, msg, "error")
+                    return msg
+
         output = ""
-        if result.stdout:
-            output += result.stdout
-        if result.stderr:
-            output += ("\n[STDERR]\n" + result.stderr) if output else result.stderr
+        if out:
+            output += out
+        if err:
+            output += ("\n[STDERR]\n" + err) if output else err
         if not output:
             output = "(command completed with no output)"
 
         output = sanitize_output(output)
         _log("run_shell_command", command, output, "success")
         return output
-    except subprocess.TimeoutExpired:
-        msg = "Command timed out after 30 seconds."
-        _log("run_shell_command", command, msg, "error")
-        return msg
     except Exception as e:
         msg = f"Error running command: {str(e)}"
         _log("run_shell_command", command, msg, "error")
@@ -721,41 +756,6 @@ def control_volume(action: str) -> str:
     except Exception as e:
         msg = f"Volume control error: {e}"
         _log("control_volume", action, msg, "error")
-        return msg
-
-
-@tool
-def web_search(query: str) -> str:
-    """
-    Search the web using DuckDuckGo. 
-    CRITICAL WARNING: This tool is currently broken and unreliable. Do NOT use this tool. You MUST use the `gather_information` tool instead for all searching, gathering, or researching tasks.
-    """
-    try:
-        from duckduckgo_search import DDGS
-    except ImportError:
-        msg = "duckduckgo-search is not installed. Run: pip install duckduckgo-search"
-        _log("web_search", query, msg, "error")
-        return msg
-
-    try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=5))
-
-        if not results:
-            msg = f"No results found for: {query}"
-            _log("web_search", query, msg, "success")
-            return msg
-
-        formatted = []
-        for i, r in enumerate(results, 1):
-            formatted.append(f"{i}. **{r.get('title', 'No title')}**\n   {r.get('body', '')}\n   URL: {r.get('href', '')}")
-
-        result = "\n\n".join(formatted)
-        _log("web_search", query, result[:200], "success")
-        return sanitize_output(result)
-    except Exception as e:
-        msg = f"Search error: {str(e)}"
-        _log("web_search", query, msg, "error")
         return msg
 
 
@@ -985,7 +985,7 @@ def set_reminder(title: str, remind_at: str, description: str = "") -> str:
 # ─────────────────────────────────────────────────────────────────────────
 
 from .browser_agent import run_browser_task
-from .state import is_cancelled
+
 
 @tool
 def delegate_browser_task(goal: str) -> str:
@@ -1017,7 +1017,7 @@ def gather_information(topic: str) -> str:
         
         response = llm.invoke(prompt)
         
-        if isinstance(response.content, list):
+        if isinstance(response.content, list) and len(response.content) > 0:
             content_str = str(response.content[0].get("text", response.content))
         else:
             content_str = str(response.content)

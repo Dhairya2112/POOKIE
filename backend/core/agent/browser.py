@@ -1,7 +1,8 @@
 import asyncio
+import logging
 import threading
 import time
-import logging
+
 from playwright.async_api import async_playwright
 
 logger = logging.getLogger("core.agent.browser")
@@ -79,7 +80,6 @@ class BrowserManager:
                     return page
             except Exception as e:
                 logger.warning("Failed to reuse session page: %s", e)
-                pass
             
             # Recreate session if broken
             await self._close_session_async(user_id)

@@ -8,9 +8,8 @@ See: https://docs.djangoproject.com/en/6.0/topics/settings/
 """
 
 import os
-import logging
-from pathlib import Path
 from datetime import timedelta
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -21,11 +20,15 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 # ── Core Security ─────────────────────────────────────────────────────────
-SECRET_KEY = os.environ.get(
-    'DJANGO_SECRET_KEY',
-    'django-insecure-o=go3%4sss1rr$jaw9rmp11xrj)xw!&mn)1^7gl0pp9ak3%krw'
-)
 DEBUG = os.environ.get('DJANGO_DEBUG', 'True') == 'True'
+
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY')
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = 'django-insecure-o=go3%4sss1rr$jaw9rmp11xrj)xw!&mn)1^7gl0pp9ak3%krw'
+    else:
+        from django.core.exceptions import ImproperlyConfigured
+        raise ImproperlyConfigured("DJANGO_SECRET_KEY environment variable is required in production (DEBUG=False).")
 ALLOWED_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1,*').split(',')
 
 
@@ -111,33 +114,39 @@ DATABASES = {
     }
 }
 
+import shutil
 # MongoDB — MongoEngine (application data)
 import socket
 import subprocess
 
+
 def ensure_mongodb_running():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(0.5)
-    is_open = sock.connect_ex(('127.0.0.1', 27017)) == 0
-    sock.close()
-    
-    if is_open:
+    def is_mongo_open():
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(0.5)
+        is_open = sock.connect_ex(('127.0.0.1', 27017)) == 0
+        sock.close()
+        return is_open
+
+    if is_mongo_open():
         return
     
     print("MongoDB is not running. Starting mongod automatically in the background...")
-    import os
-    from pathlib import Path
     app_data = os.environ.get('LOCALAPPDATA', os.path.expanduser('~'))
     db_path = Path(app_data) / "Setu" / "mongodb_data"
     db_path.mkdir(parents=True, exist_ok=True)
     
-    mongod_cmd = 'mongod'
-    if os.name == 'nt':
+    mongod_cmd = shutil.which('mongod')
+    if not mongod_cmd and os.name == 'nt':
         import glob
         possible_paths = glob.glob('C:/Program Files/MongoDB/Server/*/bin/mongod.exe')
         if possible_paths:
             mongod_cmd = possible_paths[-1] # use the latest version found
             
+    if not mongod_cmd:
+        print("WARNING: 'mongod' executable not found in PATH or Program Files. Please install MongoDB.")
+        return
+
     try:
         subprocess.Popen(
             [mongod_cmd, '--dbpath', str(db_path)],
@@ -146,18 +155,28 @@ def ensure_mongodb_running():
             creationflags=0x08000000 if os.name == 'nt' else 0
         )
         import time
-        time.sleep(2)
+
+        # Fast polling loop instead of a hard sleep
+        for _ in range(20):
+            if is_mongo_open():
+                break
+            time.sleep(0.1)
     except FileNotFoundError:
         print("WARNING: 'mongod' executable not found in PATH or Program Files. Please install MongoDB.")
 
-ensure_mongodb_running()
-
+import sys
 import mongoengine
-mongoengine.connect(
-    db=os.environ.get('MONGODB_DB', 'setu_db'),
-    host=os.environ.get('MONGODB_HOST', 'mongodb://localhost:27017/setu_db'),
-    serverSelectionTimeoutMS=5000
-)
+
+_is_utility_cmd = any(cmd in sys.argv for cmd in ['collectstatic', 'makemigrations', 'migrate', 'createsuperuser'])
+
+if not _is_utility_cmd:
+    ensure_mongodb_running()
+
+    mongoengine.connect(
+        db=os.environ.get('MONGODB_DB', 'setu_db'),
+        host=os.environ.get('MONGODB_HOST', 'mongodb://localhost:27017/setu_db'),
+        serverSelectionTimeoutMS=5000
+    )
 
 
 # ── Authentication & Password Validation ──────────────────────────────────
@@ -202,8 +221,14 @@ SIMPLE_JWT = {
 
 
 # ── CORS ─────────────────────────────────────────────────────────────────
-# DEV only — lock to explicit whitelist in Step 15.5 (Security Audit)
-CORS_ALLOW_ALL_ORIGINS = True
+# DEV only — locked to explicit whitelist for security
+CORS_ALLOW_ALL_ORIGINS = False
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000"
+]
 
 
 # ── Internationalisation ──────────────────────────────────────────────────

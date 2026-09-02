@@ -1,6 +1,7 @@
 
 from django.urls import path
-from .views import ReminderListView, ReminderDetailView
+
+from .views import ReminderDetailView, ReminderListView
 
 urlpatterns = [
     path('', ReminderListView.as_view(), name='reminders_list'),

@@ -1,9 +1,11 @@
-from kokoro import KPipeline
-import numpy as np
-import io
-import soundfile as sf
 import base64
+import io
 import re
+
+import numpy as np
+import soundfile as sf
+from kokoro import KPipeline
+
 
 class TTSEngine:
     def __init__(self):
@@ -60,7 +62,7 @@ class TTSEngine:
                 audio_chunks.append(audio)
                 
         if audio_chunks:
-            full_audio = np.concatenate(audio_chunks)
+            np.concatenate(audio_chunks)
             # Local playback removed for cross-device automation
 
     def generate_base64(self, text: str, voice: str = 'af_heart', speed: float = 1.0) -> str:
@@ -84,6 +86,9 @@ class TTSEngine:
             return ""
             
         full_audio = np.concatenate(audio_chunks)
+        
+        # Normalize/clip audio to prevent PCM_16 wrap-around distortion
+        full_audio = np.clip(full_audio, -1.0, 1.0)
         
         # Convert numpy array to WAV bytes in memory
         wav_io = io.BytesIO()

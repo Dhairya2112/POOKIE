@@ -1,6 +1,8 @@
-import mongoengine as me
 import uuid
 from datetime import datetime, timezone
+
+import mongoengine as me
+
 
 class MessageMetadata(me.EmbeddedDocument):
     intent = me.StringField(null=True)

@@ -1,7 +1,9 @@
 from django.core.management.base import BaseCommand
+
 from core.conversations.models import Conversation
 from core.reminders.models import CommandLog, Reminder
-from core.users.models import User, RefreshToken
+from core.users.models import RefreshToken, User
+
 
 class Command(BaseCommand):
     help = 'Initializes and builds MongoDB indexes defined in MongoEngine models.'

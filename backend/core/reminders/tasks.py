@@ -9,10 +9,10 @@ Push target: user_{user_id} channel group
 """
 
 import logging
-
-from channels.layers import get_channel_layer
-from asgiref.sync import async_to_sync
 from datetime import datetime, timezone
+
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
 
 from .models import Reminder
 
@@ -32,6 +32,7 @@ def check_and_fire_reminders() -> int:
         Number of reminders fired in this run.
     """
     from datetime import timedelta
+
     import mongoengine as me
 
     now = datetime.now(timezone.utc)
@@ -48,13 +49,23 @@ def check_and_fire_reminders() -> int:
 
     fired_count = 0
     for reminder in due_reminders:
-        # Mark last_fired_at to prevent rapid double-firing
-        reminder.last_fired_at = now
-        reminder.save()
+        group_name = f'user_{reminder.user_id}'
+        
+        # Check if the user is online using the central cache (works on both Memory and Redis layers).
+        from django.core.cache import cache
+        is_online = cache.get(f"user_online_{reminder.user_id}", False)
+        
+        # Fallback to true if cache is cleared but we want to attempt delivery anyway
+        if not is_online and hasattr(channel_layer, 'groups'):
+            if channel_layer.groups.get(group_name):
+                is_online = True
+                
+        if not is_online:
+            continue
 
         try:
             async_to_sync(channel_layer.group_send)(
-                f'user_{reminder.user_id}',
+                group_name,
                 {
                     'type': 'reminder_notification',
                     'reminder_id': reminder.reminder_id,
@@ -62,6 +73,9 @@ def check_and_fire_reminders() -> int:
                     'body': reminder.body or '',
                 }
             )
+            # Only mark last_fired_at after a successful push attempt
+            reminder.last_fired_at = now
+            reminder.save()
             fired_count += 1
             logger.info("Fired reminder '%s' for user %s", reminder.title, reminder.user_id)
         except Exception as e:

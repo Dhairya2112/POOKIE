@@ -1,8 +1,12 @@
-from django.apps import AppConfig
+import logging
+import os
 import threading
 import time
-import os
-import logging
+from datetime import datetime, timedelta, timezone
+
+import mongoengine
+import pymongo
+from django.apps import AppConfig
 
 logger = logging.getLogger('core.reminders')
 
@@ -16,19 +20,48 @@ def run_reminder_scheduler():
     if not is_reloader:
         time.sleep(5)  # Wait for Django setup
         logger.info("Background reminder scheduler thread started.")
+        from datetime import datetime, timedelta, timezone
+
+        import mongoengine
+        import pymongo
+
         from core.reminders.tasks import check_and_fire_reminders
+        
         while True:
             try:
-                check_and_fire_reminders()
+                db = mongoengine.get_db()
+                now = datetime.now(timezone.utc)
+                timeout = now - timedelta(seconds=25)
+                
+                acquired = False
+                try:
+                    result = db.scheduler_lock.update_one(
+                        {
+                            "_id": "singleton",
+                            "$or": [
+                                {"last_active": {"$lt": timeout}},
+                                {"last_active": {"$exists": False}}
+                            ]
+                        },
+                        {"$set": {"last_active": now}},
+                        upsert=True
+                    )
+                    acquired = result.modified_count > 0 or result.upserted_id is not None
+                except pymongo.errors.DuplicateKeyError:
+                    acquired = False
+                    
+                if acquired:
+                    check_and_fire_reminders()
             except Exception as e:
                 logger.error("Error in reminder scheduler: %s", e)
-            time.sleep(30)
+            time.sleep(10)
 
 class RemindersConfig(AppConfig):
     name = 'core.reminders'
 
     def ready(self):
         import sys
+
         # Do not start scheduler thread during Django administrative or testing commands
         if any(cmd in sys.argv for cmd in ['migrate', 'makemigrations', 'test', 'check', 'showmigrations', 'collectstatic']):
             return

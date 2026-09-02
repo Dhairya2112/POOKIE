@@ -1,6 +1,8 @@
-import mongoengine as me
 import uuid
 from datetime import datetime, timezone
+
+import mongoengine as me
+
 
 class UserPreferences(me.EmbeddedDocument):
     meta = {'strict': False}

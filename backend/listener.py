@@ -1,7 +1,9 @@
 import os
 import sys
 import uuid
+
 from dotenv import load_dotenv
+
 load_dotenv()
 
 # Ensure the agent modules can be found
@@ -9,10 +11,11 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'core'))
 
 import numpy as np
 import sounddevice as sd
-from ai.stt import STTPipeline
-from agent.llm_agent import SetuAgent
-from ai.tts import TTSEngine
 from agent.fast_responses import FastResponseRouter
+from agent.llm_agent import SetuAgent
+from ai.stt import STTPipeline
+from ai.tts import TTSEngine
+
 
 def capture_audio_dynamic(sample_rate=16000, silence_threshold=0.015, min_silence_duration=1.5):
     """Captures audio until silence is detected, returning a float32 numpy array."""
@@ -41,7 +44,14 @@ def capture_audio_dynamic(sample_rate=16000, silence_threshold=0.015, min_silenc
     
     return np.concatenate(audio_data)
 
+import argparse
+
+
 def main():
+    parser = argparse.ArgumentParser(description="Setu Local Listener")
+    parser.add_argument("--user", type=str, default="local", help="User ID to load preferences for (defaults to first user if 'local')")
+    args = parser.parse_args()
+    
     print("--- Starting Setu Agent ---")
 
     # Initialize all components
@@ -50,10 +60,40 @@ def main():
     tts = TTSEngine()
     fast_router = FastResponseRouter()
 
-    # Stable session IDs for the local voice loop.
-    # Using "local" as user_id — permissions.py allows L1 tools without a DB user.
-    LOCAL_USER_ID = "local"
-    session_conversation_id = str(uuid.uuid4())  # New conversation per listener restart
+    LOCAL_USER_ID = args.user
+    session_conversation_id = str(uuid.uuid4())
+    
+    # Defaults
+    silence_threshold = 0.015
+    user_name = os.getenv("SETU_USER_NAME", "User")
+    voice_en = 'af_heart'
+    voice_hi = 'hf_alpha'
+    speed = 1.0
+
+    try:
+        from core.users.models import User
+        if LOCAL_USER_ID == "local":
+            user = User.objects().first()
+            if user:
+                LOCAL_USER_ID = user.user_id
+        else:
+            user = User.objects(user_id=LOCAL_USER_ID).first()
+            
+        if user:
+            user_name = user.username or user_name
+            if user.preferences:
+                pref = user.preferences
+                if pref.tts_voice_gender == 'male':
+                    voice_en = 'am_echo'
+                    voice_hi = 'hm_omega'
+                speed = pref.tts_speed or 1.0
+                # Map wake word sensitivity to silence threshold (0.01 to 0.1)
+                silence_threshold = pref.wake_word_sensitivity or 0.015
+            print(f"[Config] Loaded preferences for {user_name} (Threshold: {silence_threshold}, Speed: {speed})")
+        else:
+            print("[Config] No user found in DB. Using default local settings.")
+    except Exception as e:
+        print(f"[Config] DB Error, using defaults: {e}")
 
     print("\n===============================================")
     print("Setu is now online and listening continuously.")
@@ -69,7 +109,7 @@ def main():
         # Continuous conversation loop
         while True:
             # 1. Capture audio command
-            audio_data = capture_audio_dynamic()
+            audio_data = capture_audio_dynamic(silence_threshold=silence_threshold)
 
             # 3. Speech to Text
             print("Transcribing...")
@@ -106,8 +146,8 @@ def main():
                     is_exit = True
                 else:
                     print("No speech detected. Prompting user...")
-                    voice = 'hf_alpha' if detected_lang == 'hi' else 'af_heart'
-                    tts.speak("Are you still there?", voice=voice)
+                    voice = voice_hi if detected_lang == 'hi' else voice_en
+                    tts.speak("Are you still there?", voice=voice, speed=speed)
                     continue
             elif len(words) <= 3 and any(w in ["no", "nope", "bye", "goodbye", "thanks", "thank", "stop", "nothing"] for w in words):
                 is_exit = True
@@ -120,16 +160,13 @@ def main():
                 break
 
             # Determine voice based on detected language
-            voice = 'af_heart'
-            if detected_lang == 'hi':
-                voice = 'hf_alpha'
+            voice = voice_hi if detected_lang == 'hi' else voice_en
 
             # 3.5. Tier 0 fast-path — instant response for greetings, etc.
-            user_name = os.getenv("SETU_USER_NAME", "User")
             fast = fast_router.check(text_command, user_name=user_name, language=detected_lang)
             if fast:
                 print(f"[Tier 0 — {fast.category}] {fast.text}")
-                tts.speak(fast.text, voice=voice)
+                tts.speak(fast.text, voice=voice, speed=speed)
                 print("\nListening for follow-up...")
                 continue
 
@@ -142,11 +179,11 @@ def main():
             )
 
             # 5. Text to Speech
-            tts.speak(response, voice=voice)
+            tts.speak(response, voice=voice, speed=speed)
 
             # Follow up prompt
             if not response.strip().endswith('?'):
-                tts.speak("Anything else?", voice=voice)
+                tts.speak("Anything else?", voice=voice, speed=speed)
 
             print("\nListening for follow-up...")
 

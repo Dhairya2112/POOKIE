@@ -19,22 +19,26 @@ def init_models():
         
     logger.info("Starting centralized ML model initialization (App Config) in background...")
     
-    from core.agent.llm_agent import SetuAgent
-    from core.agent.fast_responses import FastResponseRouter
-    from core.agent.tts_cache import TTSCache
-    from core.ai.tts import TTSEngine
-    from core.ai.stt import STTPipeline
+    try:
+        from core.agent.fast_responses import FastResponseRouter
+        from core.agent.llm_agent import SetuAgent
+        from core.agent.tts_cache import TTSCache
+        from core.ai.stt import STTPipeline
+        from core.ai.tts import TTSEngine
 
-    _agent_instance = SetuAgent()
-    _tts_engine = TTSEngine()
-    _fast_router = FastResponseRouter()
-    _tts_cache = TTSCache()
-    _stt_pipeline = STTPipeline()
-    
-    # Pre-warm common greetings asynchronously at server boot
-    _tts_cache.warm_cache(_tts_engine, user_names=["there", "User", "dost", "daved"])
-    logger.info("Centralized ML model initialization complete.")
-    _models_ready.set()
+        _agent_instance = SetuAgent()
+        _tts_engine = TTSEngine()
+        _fast_router = FastResponseRouter()
+        _tts_cache = TTSCache()
+        _stt_pipeline = STTPipeline()
+        
+        # Pre-warm common greetings asynchronously at server boot
+        _tts_cache.warm_cache(_tts_engine, user_names=["there", "User", "dost", "daved"])
+        logger.info("Centralized ML model initialization complete.")
+    except Exception as e:
+        logger.error(f"FATAL: ML model initialization failed: {e}", exc_info=True)
+    finally:
+        _models_ready.set()
 
 def get_agent():
     _models_ready.wait()

@@ -8,9 +8,10 @@ NOTE: CommandLog is defined in core/agent/models.py (single source of truth).
 This file contains only the Reminder model.
 """
 
-import mongoengine as me
 import uuid
 from datetime import datetime, timezone
+
+import mongoengine as me
 
 
 class Reminder(me.Document):
