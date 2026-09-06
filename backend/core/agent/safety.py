@@ -181,9 +181,10 @@ def is_path_allowed(target_path: str, user_id: str = None) -> bool:
                     pass
             return False
 
-    # If running in local CLI mode, grant full home directory access
+    # If running in local CLI mode, grant full home directory access AND workspace access
     if user_id == "local":
-        if _is_subpath(resolved, Path.home()):
+        workspace_root = Path(__file__).resolve().parents[3]
+        if _is_subpath(resolved, Path.home()) or _is_subpath(resolved, workspace_root):
             return True
         return False
         

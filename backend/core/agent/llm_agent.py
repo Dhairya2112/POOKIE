@@ -82,15 +82,22 @@ class BrainTracker(BaseCallbackHandler):
     def __init__(self):
         # We will write to brain_debug.log in the backend root
         import os
+        import logging
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
         self.log_path = os.path.join(base_dir, "brain_debug.log")
         
+        self.tracker_logger = logging.getLogger("brain_tracker")
+        self.tracker_logger.propagate = False
+        self.tracker_logger.setLevel(logging.INFO)
+        
+        # Ensure we only add the handler once
+        if not self.tracker_logger.handlers:
+            handler = logging.FileHandler(self.log_path, encoding="utf-8")
+            handler.setFormatter(logging.Formatter('%(message)s'))
+            self.tracker_logger.addHandler(handler)
+        
     def _write(self, msg):
-        try:
-            with open(self.log_path, "a", encoding="utf-8") as f:
-                f.write(msg + "\n")
-        except Exception as e:
-            logger.error(f"Failed to write to brain debug log: {e}")
+        self.tracker_logger.info(msg)
 
     def on_chat_model_start(self, serialized, messages, **kwargs):
         self._write("🧠 [BRAIN] Sending prompt to AI... thinking...")
@@ -107,27 +114,7 @@ class BrainTracker(BaseCallbackHandler):
 
 brain_tracker = BrainTracker()
 
-import aiohttp
-# ── Targeted Monkey Patches for NVIDIA NIM Timeout ─────────────────────────
-import requests
-
-_orig_request = requests.Session.request
-def _patched_request(self, method, url, *args, **kwargs):
-    if url and ("integrate.api.nvidia.com" in str(url) or "api.nvidia.com" in str(url)):
-        if "timeout" not in kwargs or kwargs["timeout"] is None:
-            kwargs["timeout"] = 5.0
-    return _orig_request(self, method, url, *args, **kwargs)
-requests.Session.request = _patched_request
-
-_orig_aiohttp_request = aiohttp.ClientSession._request
-def _patched_aiohttp_request(self, method, str_or_url, *args, **kwargs):
-    url_str = str(str_or_url)
-    if "integrate.api.nvidia.com" in url_str or "api.nvidia.com" in url_str:
-        if "timeout" not in kwargs or kwargs["timeout"] is None:
-            kwargs["timeout"] = aiohttp.ClientTimeout(total=5.0)
-    return _orig_aiohttp_request(self, method, str_or_url, *args, **kwargs)
-aiohttp.ClientSession._request = _patched_aiohttp_request
-
+# (NVIDIA NIM timeout monkey patches removed in favor of direct parameter)
 # ── Monkey Patch for ToolMessage name preservation (Gemini OpenAI Compatibility) 
 import langchain_openai.chat_models.base as openai_base
 from langchain_core.messages import ToolMessage
@@ -269,7 +256,8 @@ class SetuAgent:
         # Layer 3: NVIDIA NIM (with 5s timeout to prevent long hangs)
         self.tertiary_llm = ChatNVIDIA(
             model="meta/llama-3.1-8b-instruct",
-            nvidia_api_key=os.getenv("NVIDIA_API_KEY", "dummy")
+            nvidia_api_key=os.getenv("NVIDIA_API_KEY", "dummy"),
+            timeout=5.0
         )
         self.tertiary_agent = create_react_agent(
             self.tertiary_llm, self.tools,

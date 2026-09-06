@@ -765,7 +765,7 @@ def control_volume(action: str) -> str:
 
 @tool
 def read_file(file_path: str) -> str:
-    """Read the contents of a local file. Requires Level 2 permission. If the user does not specify a folder, ALWAYS assume the file is in '~/SETU/Data/' (e.g., '~/SETU/Data/demo.txt'). ONLY use other paths like '~/Desktop/' if explicitly requested."""
+    """Read the contents of a local file. Requires Level 2 permission. For personal notes/user data, default to '~/SETU/Data/'. For codebase or project files, use relative paths (which resolve to the project root)."""
     if not check_permission(_get_user_id(), required_level=2):
         _log("read_file", file_path, PERMISSION_DENIED_MSG, "denied")
         return PERMISSION_DENIED_MSG
@@ -777,7 +777,11 @@ def read_file(file_path: str) -> str:
             return msg
 
     try:
-        path = Path(file_path).resolve()
+        path = Path(file_path).expanduser()
+        if not path.is_absolute():
+            workspace_root = Path(__file__).resolve().parents[3]
+            path = workspace_root / path
+        path = path.resolve()
         if not path.exists():
             msg = f"File not found: {file_path}"
             _log("read_file", file_path, msg, "error")
@@ -799,7 +803,7 @@ def read_file(file_path: str) -> str:
 
 @tool
 def write_file(file_path: str, content: str) -> str:
-    """Create or overwrite a file with the given content. Requires Level 2 permission. If the user does not specify a folder, ALWAYS save to '~/SETU/Data/' (e.g., '~/SETU/Data/demo.txt'). ONLY use other paths like '~/Desktop/' if explicitly requested."""
+    """Create or overwrite a file. Requires Level 2 permission. For personal notes, default to '~/SETU/Data/'. For project files, use relative paths."""
     if not check_permission(_get_user_id(), required_level=2):
         _log("write_file", file_path, PERMISSION_DENIED_MSG, "denied")
         return PERMISSION_DENIED_MSG
@@ -811,7 +815,11 @@ def write_file(file_path: str, content: str) -> str:
             return msg
 
     try:
-        path = Path(file_path).resolve()
+        path = Path(file_path).expanduser()
+        if not path.is_absolute():
+            workspace_root = Path(__file__).resolve().parents[3]
+            path = workspace_root / path
+        path = path.resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         result = f"File written successfully: {file_path} ({len(content)} chars)"
@@ -837,7 +845,11 @@ def search_files(directory: str, pattern: str = "*") -> str:
             return msg
 
     try:
-        search_path = Path(directory).resolve()
+        search_path = Path(directory).expanduser()
+        if not search_path.is_absolute():
+            workspace_root = Path(__file__).resolve().parents[3]
+            search_path = workspace_root / search_path
+        search_path = search_path.resolve()
         if not search_path.exists():
             msg = f"Directory not found: {directory}"
             _log("search_files", directory, msg, "error")
@@ -861,8 +873,8 @@ def search_files(directory: str, pattern: str = "*") -> str:
 
 
 @tool
-def list_directory(directory: str = "~/SETU/Data/") -> str:
-    """List all files and folders in a directory. Requires Level 2 permission. If the user does not specify a folder, ALWAYS use '~/SETU/Data/'. ONLY use other paths if explicitly requested."""
+def list_directory(directory: str = ".") -> str:
+    """List all files and folders in a directory. Requires Level 2 permission. Use relative paths to explore the project codebase, or absolute paths if specified."""
     if not check_permission(_get_user_id(), required_level=2):
         _log("list_directory", directory, PERMISSION_DENIED_MSG, "denied")
         return PERMISSION_DENIED_MSG
@@ -874,7 +886,11 @@ def list_directory(directory: str = "~/SETU/Data/") -> str:
             return msg
 
     try:
-        path = Path(directory).expanduser().resolve()
+        path = Path(directory).expanduser()
+        if not path.is_absolute():
+            workspace_root = Path(__file__).resolve().parents[3]
+            path = workspace_root / path
+        path = path.resolve()
         if not path.exists():
             msg = f"Directory not found: {directory}"
             _log("list_directory", directory, msg, "error")

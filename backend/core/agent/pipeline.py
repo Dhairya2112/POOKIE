@@ -263,8 +263,11 @@ def process_agent_command(text: str, conversation_id: str, user_id: str, channel
             _push(channel_layer, group, 'text', error_msg)
             response_text += error_msg
             has_error = True
-            
-            threading.Thread(target=generate_and_push_tts, args=("Sorry, I ran into a system error.",), daemon=True).start()
+            # Generate and push TTS synchronously so it finishes before 'failed' status is sent
+            try:
+                generate_and_push_tts("Sorry, I ran into a system error.")
+            except Exception as e:
+                logger.error("Failed to push error TTS: %s", e)
 
         if is_cancelled(conversation_id):
             _push(channel_layer, group, 'status', 'cancelled')

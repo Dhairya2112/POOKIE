@@ -86,9 +86,13 @@ class STTPipeline:
         segment_list = list(segments)
         text = " ".join([segment.text for segment in segment_list]).strip()
         
-        # Calculate average log probability (confidence)
+        # Calculate average log probability (confidence) weighted by segment duration
         if segment_list:
-            avg_logprob = sum(s.avg_logprob for s in segment_list) / len(segment_list)
+            total_duration = sum((s.end - s.start) for s in segment_list)
+            if total_duration > 0:
+                avg_logprob = sum(s.avg_logprob * (s.end - s.start) for s in segment_list) / total_duration
+            else:
+                avg_logprob = sum(s.avg_logprob for s in segment_list) / len(segment_list)
         else:
             avg_logprob = 0.0
             
